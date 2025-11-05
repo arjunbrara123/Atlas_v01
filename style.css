@@ -1,0 +1,104 @@
+[data-testid="stSidebar"] {
+    background: linear-gradient(to left, #0490d7, white);
+    color: black;
+    margin-top: -20px;
+}
+
+/* Global dashboard body styling */
+body {
+    background-color: #1E1E1E;
+    color: #FAFAFA;
+}
+
+h1, h2, h3 {
+    color: #012973;
+}
+
+hr {
+    border: 1px solid #0490d7;
+    margin: 20px 0;
+}
+
+section[data-testid="stSidebar"] {
+    background-color: #0490d7;
+}
+
+
+.stText, .stHeader, .stSubheader, .stMarkdown {
+    color: #012973;
+}
+
+.rounded-block {
+    border: 3px solid #0490d7; /* Border color */
+    border-radius: 15px; /* Rounded corners */
+    padding: 20px; /* Padding inside the block */
+    box-shadow: 5px 5px 15px rgba(0, 0, 0, 0.3); /* 3D shadow effect */
+    margin-bottom: 20px; /* Spacing between blocks */
+    margin-left: 5px; /* Spacing between blocks */
+    margin-right: 5px; /* Spacing between blocks */
+    background-color: #f9f9f9; /* Background color */
+    text-align: left; /* Left align text */
+}
+.rounded-block-good {
+    border: 3px solid #32CD32; /* Border color */
+    border-radius: 15px; /* Rounded corners */
+    padding: 20px; /* Padding inside the block */
+    box-shadow: 5px 5px 15px rgba(0, 0, 0, 0.3); /* 3D shadow effect */
+    margin-bottom: 20px; /* Spacing between blocks */
+    margin-left: 5px; /* Spacing between blocks */
+    margin-right: 5px; /* Spacing between blocks */
+    background-color: #f9f9f9; /* Background color */
+    text-align: left; /* Center align text */
+}
+.rounded-block-bad {
+    border: 3px solid #FF0000; /* Border color */
+    border-radius: 15px; /* Rounded corners */
+    padding: 20px; /* Padding inside the block */
+    box-shadow: 5px 5px 15px rgba(0, 0, 0, 0.3); /* 3D shadow effect */
+    margin-bottom: 20px; /* Spacing between blocks */
+    margin-left: 5px; /* Spacing between blocks */
+    margin-right: 5px; /* Spacing between blocks */
+    background-color: #f9f9f9; /* Background color */
+    text-align: left; /* Center align text */
+}
+.rounded-block-neutral {
+    border: 3px solid #FFD700; /* Border color */
+    border-radius: 15px; /* Rounded corners */
+    padding: 20px; /* Padding inside the block */
+    box-shadow: 5px 5px 15px rgba(0, 0, 0, 0.3); /* 3D shadow effect */
+    margin-bottom: 20px; /* Spacing between blocks */
+    margin-left: 5px; /* Spacing between blocks */
+    margin-right: 5px; /* Spacing between blocks */
+    background-color: #f9f9f9; /* Background color */
+    text-align: left; /* Center align text */
+}
+
+/* Tabs styling */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 2px;
+}
+
+.stTabs [data-baseweb="tab"] {
+    height: 50px;
+    white-space: pre-wrap;
+    background-color: #F0F2F6;
+    border-radius: 10px 10px 0px 0px;
+    gap: 1px;
+    padding: 10px 20px;
+    color: #0490d7;
+}
+
+.stTabs [role="tab"]:hover {
+    background-color: #CAF0F8;
+    background: linear-gradient(0deg, #DCDCDC 0%, #F0F2F6 100%);
+}
+
+.stTabs [aria-selected="true"] {
+    background-color: #0490d7 !important;
+    background: linear-gradient(0deg, #0490d7 0%, #7ec0ee 100%) !important;
+    color: #ffffff;
+}
+
+.stTabs [data-baseweb="tab-highlight"] {
+    background-color: #012973 !important;
+}
