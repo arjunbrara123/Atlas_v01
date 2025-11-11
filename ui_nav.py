@@ -56,7 +56,6 @@ def build_sidebar(user, role, allowed_envs, section_icons, allowed_pages):
 
     with st.sidebar:
         st.image("images/company_logo.png")
-
         st.write(f"**User:** {user}")
 
         # --- 4. Navigation (Unchanged) ---

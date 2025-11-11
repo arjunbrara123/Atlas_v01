@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS bp_file_templates (
     min_file_size_kb INTEGER,
     max_file_size_kb INTEGER,
     expected_structure TEXT,
+    primary_key_column TEXT,
 
     -- Audit
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -219,6 +220,8 @@ CREATE TABLE IF NOT EXISTS inst_actuarial_model_files (
     
     -- Status
     current_status TEXT DEFAULT 'Active',
+    validation_summary TEXT,
+    job_status TEXT,
     
     -- Audit
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,

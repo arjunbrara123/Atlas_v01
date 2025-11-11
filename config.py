@@ -26,43 +26,43 @@ ALL_PAGES = {
     # 3. ACTUARIAL MODELS (calculation layer: capital + BI + scenarios)
     "Actuarial Models": {
         "Cold Weather Model": {
-            "module": "models.capital_cold_weather",
+            "module": "actuarial_models.capital_cold_weather",
             "allowed_roles": ["risk", "admin", "exec", "developer"]
         },
         "Plumbing & Drains": {
-            "module": "models.capital_plumbing_drains",
+            "module": "actuarial_models.capital_plumbing_drains",
             "allowed_roles": ["risk", "admin", "exec", "developer"]
         },
         "Attritional Loss": {
-            "module": "models.capital_attritional_loss",
+            "module": "actuarial_models.capital_attritional_loss",
             "allowed_roles": ["risk", "admin", "exec", "developer"]
         },
         "Market Risk": {
-            "module": "models.capital_market_risk",
+            "module": "actuarial_models.capital_market_risk",
             "allowed_roles": ["risk", "admin", "exec", "developer"]
         },
         "Operational Risk": {
-            "module": "models.capital_operational_risk",
+            "module": "actuarial_models.capital_operational_risk",
             "allowed_roles": ["risk", "admin", "exec", "developer"]
         },
         "Counterparty Default": {
-            "module": "models.capital_counterparty_default",
+            "module": "actuarial_models.capital_counterparty_default",
             "allowed_roles": ["risk", "admin", "exec", "developer"]
         },
         "Credit Risk": {
-            "module": "models.capital_credit_risk",
+            "module": "actuarial_models.capital_credit_risk",
             "allowed_roles": ["risk", "admin", "exec", "developer"]
         },
 
         # Underwriting performance model logic
         "Underwriting Metrics": {
-            "module": "models.underwriting_performance_model",
+            "module": "actuarial_models.underwriting_performance_model",
             "allowed_roles": ["commercial", "admin", "exec", "developer"]
         },
 
         # Competitor intelligence modelling (market position, pricing deltas)
         "Competitor Intel": {
-            "module": "models.competitor_intel_model",
+            "module": "actuarial_models.competitor_intel_model",
             "allowed_roles": ["commercial", "admin", "exec", "developer"]
         }
     },

@@ -4,6 +4,15 @@
     margin-top: -20px;
 }
 
+/* Make the central container take the full width & reduce side padding */
+.block-container {
+    max-width: 100%;
+    padding-left: 2rem;
+    padding-right: 2rem;
+    padding-top: 1rem;
+    padding-bottom: 3rem;
+}
+
 /* Global dashboard body styling */
 body {
     background-color: #1E1E1E;

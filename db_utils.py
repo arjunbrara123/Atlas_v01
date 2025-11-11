@@ -48,14 +48,14 @@ DB_FILE = "atlas_registry.db"
 
 # The action you want to perform.
 # Options: "LIST_TABLES", "GET_TABLE_INFO", "ADD_COLUMN", "RENAME_COLUMN", "DELETE_COLUMN", "ADD_TABLE"
-ACTION = "GET_TABLE_INFO"
+ACTION = "ADD_COLUMN"
 
 # The name of the table you want to interact with
-TABLE_NAME = "plan_project_milestones"
+TABLE_NAME = "inst_actuarial_model_files"
 
 # --- For "ADD_COLUMN" ---
-COLUMN_NAME = "depends_on_milestone_id"
-COLUMN_TYPE = "INTEGER"  # e.g., "TEXT", "INTEGER", "DATETIME", "TEXT DEFAULT 'Pending'"
+COLUMN_NAME = "job_status"
+COLUMN_TYPE = "TEXT"  # e.g., "TEXT", "INTEGER", "DATETIME", "TEXT DEFAULT 'Pending'"
 
 # --- For "RENAME_COLUMN" ---
 OLD_COLUMN_NAME = "source_team_from"

@@ -85,6 +85,12 @@ This file is organized into 9 logical sections.
     [F-FILE-R] File Instance "Read" Functions
     - get_all_files_in_environment(): (For Admin) Gets a list of all files in an env.
     - get_files_for_user_dashboard(): (For Doer/Reviewer) Smartly gets "inbox" and all files for a stage.
+    - get_all_versions_for_template(): (For UI "Data Explorer") Gets all versions of a single file in one environment.
+    - get_file_preview(): (For UI) Safely loads a file from disk for previewing.
+    - get_file_comparison(): (For UI) Compares two file versions and finds changes.
+    - get_approved_files_for_blueprint(): (For Model UI) Gets all "Fully Approved" files of a specific type.
+    - get_file_by_id(table_name: str, file_id: int): (For Internal Use) Gets a single file record by its table name and primary key.
+    - get_all_files_for_template(): (For Explorer/Notebook) Gets all versions of a file, with optional user filter.
 
     [F-GOV-R] Governance (Audit/Lineage) "Read" Functions
     - get_audit_log_for_target(): (For UI) Gets the audit history for *one* specific item.
@@ -126,6 +132,8 @@ This file is organized into 9 logical sections.
 
     [F-FILE-W] File Instance "Write" Functions
     - upload_new_file_instance(): (The "Doer" upload) Validates, hashes, and saves a new file.
+    - upload_edited_file(): (For "Editor" UI) Saves an in-app edit as a new version.
+    - create_draft_model_file(): (For "Lab Notebook") Creates a new 'Pending' model run.
     - run_external_connection_job(): Retrieve a file from a whitelisted internet source.
     - log_user_signoff(): (The "Reviewer" action) Logs a sign-off or rejection.
 
@@ -147,6 +155,13 @@ This file is organized into 9 logical sections.
     - get_system_kpis(): Gets high-level counts of all objects (files, envs, etc.).
     - get_pending_actions_dashboard(): Finds all files across the system needing sign-off.
     - get_approved_domains(): Returns the list of whitelisted domains for the UI.
+    - get_data_owner_teams(): Returns the master list of data owner teams for the UI.
+    - get_editor_roles(): Returns a list of roles allowed to use the data editor.
+    - get_all_files_dataframe_for_env(): (For Overview) Gets the "Master DataFrame" for the readiness dashboard.
+    - get_audit_log_for_environment(): (For Overview) Gets all audit logs for one environment.
+    - get_full_lineage_graph(): (For Overview) Gets all nodes and edges for the lineage chart.
+    - get_system_integrity_report(): (For Overview) Runs a full health check (orphans, hashes).
+    - get_all_permissions(): (For Overview) Gets the full user/file permissions matrix.
 
 --- SECTION 9: UNUSED / FUTURE FUNCTIONS ---
     - run_new_model(): (Placeholder) A future function for running models.
@@ -160,7 +175,10 @@ from datetime import datetime
 import json
 import hashlib
 import sys
+import pandas as pd
 import io  # Used for in-memory file simulation
+import requests
+import difflib
 
 # --- [S1] SECTION 1: CONFIGURATION & CONSTANTS ---
 
@@ -170,6 +188,23 @@ DB_FILE = "atlas_registry.db"
 # Root path for all physical environment folders
 # Use an absolute path for your server
 ENVIRONMENT_ROOT_PATH = os.path.abspath(os.path.join(os.getcwd(), "AtlasEnvironments"))
+
+# Internal Team Names
+DATA_OWNER_TEAMS = [
+    "Actuarial",
+    "Finance",
+    "Risk",
+    "Commercial",
+    "Investments",
+    "Executive",
+    "Platform Admin"
+]
+
+# Master list of roles allowed to use the "Data Editor" tab
+EDITOR_ROLES = [
+    "admin",
+    "inputs_admin"
+]
 
 # Standard folder names used inside each environment folder
 ALL_FOLDERS = ["Data Inputs", "Actuarial Models", "Results & Validation", "Reports & Insights"]
@@ -212,7 +247,7 @@ STAGE_TO_TABLE_MAP = {
 # This is CRITICAL for robust polymorphic queries and avoids all guessing bugs.
 TABLE_ID_MAP = {
     "inst_data_input_files":      "data_file_id",
-    "inst_actuarial_model_files": "model_file_id",
+    "inst_actuarial_model_files": "model_run_id",
     "inst_result_files":          "result_file_id",
     "inst_report_files":          "report_file_id",
     # Admin tables
@@ -290,15 +325,37 @@ def _save_uploaded_file(uploaded_file, file_path: str) -> dict:
     file_size_bytes = os.path.getsize(full_path)
     file_size_kb = round(file_size_bytes / 1024, 2)
 
-    # Placeholder for actual metric extraction
-    # In a real app, we'd open the .xlsx or .csv here to get tabs/columns
     actual_structure = {}
-    if uploaded_file.name.endswith((".xlsx", ".xlsb")):
-        # In a real app: use openpyxl to get sheet names
-        actual_structure = {"tabs": ["Sheet1", "Sheet2"]} # Example
-    elif uploaded_file.name.endswith(".csv"):
-        # In a real app: use csv.reader to get header
-        actual_structure = {"columns": ["col_a", "col_b"]} # Example
+    try:
+        if uploaded_file.name.endswith((".xlsx", ".xlsb", ".xlsm", ".xls")):
+            # Use pandas to get all sheet names
+            xls = pd.ExcelFile(full_path)
+            actual_structure = {"tabs": xls.sheet_names}
+
+        elif uploaded_file.name.endswith(".csv"):
+            # Use pandas to get all column headers
+            # nrows=0 loads no data, just the headers
+            df = pd.read_csv(full_path, nrows=0)
+            actual_structure = {"columns": df.columns.tolist()}
+
+        elif uploaded_file.name.endswith(".txt"):
+            # Try to read as a CSV (tab or space delimited)
+            # We "sniff" the delimiter
+            try:
+                df = pd.read_csv(full_path, sep=r'\s+', nrows=0, engine='python')
+                if len(df.columns) > 1:
+                    actual_structure = {"columns": df.columns.tolist()}
+                else:
+                    actual_structure = {"type": "raw_text"}  # It's just a text file
+            except Exception:
+                actual_structure = {"type": "raw_text"}
+
+        # In a full app, we would add .parquet, .json, etc. here
+
+    except Exception as e:
+        # If the file is corrupt and pandas can't read it, log the error
+        print(f"CRITICAL: Failed to extract schema from {full_path}: {e}", file=sys.stderr)
+        actual_structure = {"error": f"File is corrupt or unreadable: {e}"}
     
     # Return metrics as a dict
     return {
@@ -817,12 +874,21 @@ def get_files_for_user_dashboard(env_id: str, stage: str, user_id: str, user_rol
         all_files_query = f"""
             SELECT T1.*, 
                    BP.template_name, BP.signoff_workflow, 
-                   BP.doer_roles, BP.reviewer_roles
-            FROM {table_name} AS T1
-            LEFT JOIN bp_file_templates AS BP ON T1.template_id = BP.template_id
-            WHERE T1.env_id = ?
-            ORDER BY T1.created_at DESC
-        """
+                   BP.doer_roles, BP.reviewer_roles,
+                   (
+                       SELECT T2.{id_col}
+                       FROM {table_name} AS T2
+                       WHERE T2.template_id = T1.template_id
+                         AND T2.current_status = 'Superseded'
+                         AND T2.created_at < T1.created_at
+                       ORDER BY T2.created_at DESC
+                       LIMIT 1
+                   ) AS superseded_file_id
+                    FROM {table_name} AS T1
+                    LEFT JOIN bp_file_templates AS BP ON T1.template_id = BP.template_id
+                    WHERE T1.env_id = ?
+                    ORDER BY T1.created_at DESC
+                """
         all_files = [dict(row) for row in conn.execute(all_files_query, (env_id,)).fetchall()]
 
         if not all_files:
@@ -889,6 +955,416 @@ def get_files_for_user_dashboard(env_id: str, stage: str, user_id: str, user_rol
         }
     finally:
         conn.close()
+
+
+def get_all_versions_for_template(env_id: str, template_id: str):
+    """
+    (For UI "Data Explorer") Gets all versions of a single file
+    in one environment.
+    """
+    conn = _get_db_conn()
+    if not conn: return []
+    try:
+        # 1. We must find the blueprint to get the stage and table name
+        bp = get_file_blueprint_by_id(template_id)
+        if not bp:
+            raise ValueError(f"Blueprint {template_id} not found.")
+
+        table_name = STAGE_TO_TABLE_MAP.get(bp['stage'])
+        id_col = TABLE_ID_MAP.get(table_name)
+
+        if not table_name or not id_col:
+            raise ValueError(f"Could not find table for blueprint {template_id}.")
+
+        # 2. Now, select all versions of that file in that environment
+        query = f"""
+            SELECT {id_col}, created_at, created_by, current_status, file_hash_sha256
+            FROM {table_name}
+            WHERE template_id = ? AND env_id = ?
+            ORDER BY created_at DESC
+        """
+        return [dict(row) for row in conn.execute(query, (template_id, env_id)).fetchall()]
+
+    except Exception as e:
+        print(f"Error in get_all_versions_for_template: {e}", file=sys.stderr)
+        return []  # Return empty list on error
+    finally:
+        if conn: conn.close()
+
+def get_file_preview(relative_path: str, expected_hash: str):
+    """
+    (For UI Data Viewer) Safely loads and *validates* a file from
+    the file system for previewing in Streamlit.
+    Returns a dict: {'type': '...', 'data': ...}
+    """
+    try:
+        # Use the existing ENVIRONMENT_ROOT_PATH constant
+        full_path = os.path.join(ENVIRONMENT_ROOT_PATH, relative_path)
+
+        if not os.path.exists(full_path):
+            raise FileNotFoundError(f"File not found at {full_path}")
+
+        # --- THIS IS THE FIX ---
+        # 1. Calculate the hash of the file on disk
+        sha256_hash = hashlib.sha256()
+        with open(full_path, "rb") as f:
+            # Read and update hash in chunks of 4K
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        actual_hash = sha256_hash.hexdigest()
+
+        # 2. Compare to the hash from the database
+        if actual_hash != expected_hash:
+            return {
+                "type": "error",
+                "data": f"TAMPERING DETECTED. The file on disk has been modified. "
+                        f"Expected Hash: {expected_hash}, "
+                        f"Actual Hash: {actual_hash}"
+            }
+        # --- END OF FIX ---
+
+        # If hashes match, proceed with loading the file
+        ext = os.path.splitext(relative_path)[1].lower()
+
+        if ext in ['.xlsx', '.xlsb']:
+            # Read all sheets. sheet_name=None returns a dict
+            excel_data = pd.read_excel(full_path, sheet_name=None)
+            # We return the dict of dataframes
+            return {"type": "excel", "data": excel_data}
+
+        elif ext == '.csv':
+            df = pd.read_csv(full_path)
+            return {"type": "dataframe", "data": df}
+
+        elif ext == '.txt':
+            # Try to read as a table, assuming space or tab delimited
+            try:
+                # r'\s+' is a regular expression for one or more whitespace chars
+                df = pd.read_csv(full_path, sep=r'\s+', engine='python')
+                if len(df.columns) <= 1:
+                    raise ValueError("Not a table, treat as raw text.")
+                return {"type": "dataframe", "data": df}
+            except Exception as e:
+                # If it fails to parse as a table, read as raw text
+                with open(full_path, 'r') as f:
+                    content = f.read()
+                return {"type": "raw_text", "data": content}
+
+        else:
+            return {"type": "unsupported", "data": f"Preview not available for {ext} files."}
+
+    except Exception as e:
+        # Return the error message to be displayed in the UI
+        return {"type": "error", "data": str(e)}
+
+
+def get_file_comparison(table_name: str, new_file_id: int, old_file_id: int):
+    """
+    (For UI "Smart Inbox") Compares any two file versions.
+
+    This is a "smart diff" function. It checks for a 'primary_key_column'
+    in the blueprint and runs one of two diffs:
+    1. Keyed Diff (Smart): Finds true adds, deletes, and mods.
+    2. Basic Diff (Simple): Compares row-by-row.
+    """
+    conn = _get_db_conn()
+    if not conn:
+        return {"type": "error", "data": "Database connection failed."}
+
+    try:
+        id_col = TABLE_ID_MAP.get(table_name)
+
+        # 1. Get both files' details
+        new_file = conn.execute(f"SELECT * FROM {table_name} WHERE {id_col} = ?", (new_file_id,)).fetchone()
+        old_file = conn.execute(f"SELECT * FROM {table_name} WHERE {id_col} = ?", (old_file_id,)).fetchone()
+
+        if not new_file: raise ValueError(f"New file (ID: {new_file_id}) not found.")
+        if not old_file: raise ValueError(f"Old file (ID: {old_file_id}) not found.")
+
+        # --- THIS IS THE NEW LOGIC ---
+        # 2. Get the blueprint to check for a Primary Key
+        bp = get_file_blueprint_by_id(new_file['template_id'])
+        primary_key = bp.get('primary_key_column') if bp else None
+        # --- END NEW LOGIC ---
+
+        # 3. Get full paths for both files
+        new_path = os.path.join(ENVIRONMENT_ROOT_PATH, new_file['file_path'])
+        old_path = os.path.join(ENVIRONMENT_ROOT_PATH, old_file['file_path'])
+        ext = os.path.splitext(new_path)[1].lower()
+
+        # 4. Perform the comparison
+        if ext in ['.xlsx', '.csv', '.txt']:
+
+            def load_df(path):
+                file_ext = os.path.splitext(path)[1].lower()
+                if file_ext in ['.xlsx', '.xlsb']:
+                    # For now, we compare the first sheet.
+                    return pd.read_excel(path, sheet_name=0).fillna("")
+                elif file_ext == '.csv':
+                    return pd.read_csv(path).fillna("")
+                elif file_ext == '.txt':
+                    try:  # Try to read as a table
+                        return pd.read_csv(path, sep=r'\s+', engine='python').fillna("")
+                    except:  # Fallback for raw text
+                        return pd.DataFrame()  # Return empty to skip diff
+                return pd.DataFrame()
+
+            df_new = load_df(new_path)
+            df_old = load_df(old_path)
+
+            if df_new.equals(df_old):
+                return {"type": "no_changes", "data": "No data differences found between versions."}
+
+            # --- THIS IS THE NEW SMART LOGIC ---
+            #
+            # 5a. Run "SMART DIFF" if a Primary Key is provided
+            #
+            if primary_key and primary_key in df_new.columns and primary_key in df_old.columns:
+
+                # Use the key to find adds, deletes, and common rows
+                df_merged = df_old.merge(df_new, on=primary_key, how='outer',
+                                         suffixes=('_OLD', '_NEW'), indicator=True)
+
+                new_rows_df = df_merged[df_merged['_merge'] == 'right_only'].filter(like='_NEW', axis=1).rename(
+                    columns=lambda x: x.replace('_NEW', ''))
+                deleted_rows_df = df_merged[df_merged['_merge'] == 'left_only'].filter(like='_OLD', axis=1).rename(
+                    columns=lambda x: x.replace('_OLD', ''))
+
+                # Find modifications in the common rows
+                common_rows = df_merged[df_merged['_merge'] == 'both']
+                modified_rows_old_list = []
+                modified_rows_new_list = []
+
+                # Check for differences
+                for col in df_old.columns:
+                    if col == primary_key: continue
+                    col_old = f"{col}_OLD"
+                    col_new = f"{col}_NEW"
+                    if col_old in common_rows and col_new in common_rows:
+                        # Find rows where old != new
+                        diff_mask = common_rows[col_old] != common_rows[col_new]
+                        if diff_mask.any():
+                            modified_rows_old_list.append(
+                                df_old[df_old[primary_key].isin(common_rows[diff_mask][primary_key])])
+                            modified_rows_new_list.append(
+                                df_new[df_new[primary_key].isin(common_rows[diff_mask][primary_key])])
+
+                # Combine all modified rows (if any)
+                modified_rows_old = pd.concat(
+                    modified_rows_old_list).drop_duplicates() if modified_rows_old_list else pd.DataFrame(
+                    columns=df_old.columns)
+                modified_rows_new = pd.concat(
+                    modified_rows_new_list).drop_duplicates() if modified_rows_new_list else pd.DataFrame(
+                    columns=df_new.columns)
+
+                return {
+                    "type": "comparison",
+                    "full_new": df_new, "full_old": df_old,
+                    "new_rows": new_rows_df,
+                    "deleted_rows": deleted_rows_df,
+                    "modified_rows_old": modified_rows_old,
+                    "modified_rows_new": modified_rows_new,
+                }
+
+            #
+            # 5b. Run "BASIC DIFF" if no Primary Key is provided
+            #
+            else:
+                df_new_c = df_new.fillna("")
+                df_old_c = df_old.fillna("")
+
+                # Use .compare() for a simple row-by-row check
+                df_diff = df_new_c.compare(df_old_c, align_axis=0, keep_shape=True, keep_equal=False)
+
+                changed_idx = df_diff.dropna(how='all').index
+                changed_cols = df_diff.stack().unstack(level=1)['self'].columns.tolist()
+
+                # This "basic" diff can't find new/deleted rows, only modified ones
+                return {
+                    "type": "comparison",
+                    "full_new": df_new, "full_old": df_old,
+                    "new_rows": pd.DataFrame(),  # Not supported by this method
+                    "deleted_rows": pd.DataFrame(),  # Not supported by this method
+                    "modified_rows_old": df_old.iloc[changed_idx],
+                    "modified_rows_new": df_new.iloc[changed_idx],
+                }
+            # --- END OF NEW SMART LOGIC ---
+
+        elif ext == '.txt':
+            # (Text file logic remains the same)
+            import difflib
+            with open(old_path, 'r') as f_old:
+                old_lines = f_old.readlines()
+            with open(new_path, 'r') as f_new:
+                new_lines = f_new.readlines()
+
+            diff_text = "".join(difflib.unified_diff(
+                old_lines, new_lines,
+                fromfile=os.path.basename(old_path),
+                tofile=os.path.basename(new_path),
+                lineterm='',
+            ))
+            if not diff_text:
+                return {"type": "no_changes", "data": "No text differences found between versions."}
+            return {"type": "text", "data": diff_text}
+
+        else:
+            return {"type": "error", "data": f"Comparison not supported for {ext} files."}
+
+    except Exception as e:
+        return {"type": "error", "data": f"Failed to run comparison: {e}"}
+    finally:
+        if conn: conn.close()
+
+
+def get_approved_files_for_blueprint(env_id: str, template_id: str):
+    """
+    (For Model UI Dropdowns)
+    Gets all "Fully Approved" files for a specific blueprint.
+
+    "Fully Approved" means:
+    1. `current_status` is 'Active'.
+    2. It has a 'Doer' sign-off.
+    3. If required, it *also* has a 'Reviewer' sign-off.
+    """
+    conn = _get_db_conn()
+    if not conn: return []
+
+    try:
+        # 1. Get the rules from the blueprint
+        bp = get_file_blueprint_by_id(template_id)
+        if not bp:
+            raise ValueError(f"Blueprint '{template_id}' not found.")
+
+        workflow = bp.get('signoff_workflow', 'Doer Only')
+        table_name = STAGE_TO_TABLE_MAP.get(bp['stage'])
+        id_col = TABLE_ID_MAP.get(table_name)
+
+        if not table_name or not id_col:
+            raise ValueError(f"Invalid blueprint configuration for '{template_id}'.")
+
+        # 2. Build the "Smart" Query
+        # This query joins the file (T1) with its blueprint (T2)
+        # and then uses EXISTS subqueries to check for sign-offs.
+
+        # Base query checks for 'Active' files of the correct type
+        base_query = f"""
+            SELECT T1.*
+            FROM {table_name} AS T1
+            WHERE T1.env_id = ?
+              AND T1.template_id = ?
+              AND T1.current_status = 'Active'
+        """
+
+        params = [env_id, template_id]
+
+        # 3. Add Governance Checks based on the workflow
+
+        # All workflows require a 'Doer' sign-off
+        doer_check = f"""
+            AND EXISTS (
+                SELECT 1 FROM gov_audit_trail AS A
+                WHERE A.target_table = ?
+                  AND A.target_id = T1.{id_col}
+                  AND A.action = 'SIGN_OFF'
+                  AND A.signoff_capacity = 'Doer'
+            )
+        """
+        base_query += doer_check
+        params.append(table_name)
+
+        # Add 'Reviewer' check *only* if the blueprint requires it
+        if workflow == 'Doer + Reviewer':
+            reviewer_check = f"""
+                AND EXISTS (
+                    SELECT 1 FROM gov_audit_trail AS A
+                    WHERE A.target_table = ?
+                      AND A.target_id = T1.{id_col}
+                      AND A.action = 'SIGN_OFF'
+                      AND A.signoff_capacity = 'Reviewer'
+                )
+            """
+            base_query += reviewer_check
+            params.append(table_name)
+
+        base_query += " ORDER BY T1.created_at DESC"
+
+        # 4. Execute and return
+        return [dict(row) for row in conn.execute(base_query, params).fetchall()]
+
+    except Exception as e:
+        print(f"Error in get_approved_files_for_blueprint: {e}", file=sys.stderr)
+        return []  # Return an empty list on error
+    finally:
+        if conn: conn.close()
+
+
+def get_file_by_id(table_name: str, file_id: int):
+    """
+    (For Internal Use) Gets a single file record by its
+    table name and primary key.
+    """
+    conn = _get_db_conn()
+    if not conn: return None
+    try:
+        id_col = TABLE_ID_MAP.get(table_name)
+        if not id_col:
+            raise ValueError(f"Invalid table_name: {table_name}")
+
+        row = conn.execute(f"SELECT * FROM {table_name} WHERE {id_col} = ?", (file_id,)).fetchone()
+        return dict(row) if row else None
+
+    except Exception as e:
+        print(f"Error in get_file_by_id: {e}", file=sys.stderr)
+        return None
+    finally:
+        if conn: conn.close()
+
+
+def get_all_files_for_template(env_id: str, template_id: str, user_id: str = None):
+    """
+    (For UI "Data Explorer" & "Lab Notebook")
+    Gets all versions of a single file in one environment.
+
+    - If 'user_id' is provided, it filters by 'created_by' (for "My Drafts").
+    - If 'user_id' is None, it gets *all* versions (for "Explorer").
+    """
+    conn = _get_db_conn()
+    if not conn: return []
+    try:
+        # 1. Find the blueprint to get the table name
+        bp = get_file_blueprint_by_id(template_id)
+        if not bp:
+            raise ValueError(f"Blueprint {template_id} not found.")
+
+        table_name = STAGE_TO_TABLE_MAP.get(bp['stage'])
+        id_col = TABLE_ID_MAP.get(table_name)
+
+        if not table_name or not id_col:
+            raise ValueError(f"Could not find table for blueprint {template_id}.")
+
+        # 2. Build the query
+        params = [template_id, env_id]
+        query = f"""
+            SELECT *
+            FROM {table_name}
+            WHERE template_id = ? AND env_id = ?
+        """
+
+        # 3. Add the optional user filter
+        if user_id:
+            query += " AND created_by = ?"
+            params.append(user_id)
+
+        query += " ORDER BY created_at DESC"
+
+        return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    except Exception as e:
+        print(f"Error in get_all_files_for_template: {e}", file=sys.stderr)
+        return []  # Return empty list on error
+    finally:
+        if conn: conn.close()
 
 # --- Governance (Audit/Lineage) "Read" Functions [F-GOV-R] ---
 
@@ -1409,7 +1885,7 @@ def delete_file_blueprint(template_id, user_id):
 # --- File Instance "Write" Functions [F-FILE-W] ---
 
 def upload_new_file_instance(user_id: str, user_role: str, env_id: str, template_id: str, 
-                             uploaded_file, source_ids_map: dict = None):
+                             uploaded_file, source_ids_map: dict = None, custom_audit_comment: str = None):
     """
     (For "Doer" UI) The main function for a user uploading/running a file.
     This function performs all validation, hashing, and the "dual-write"
@@ -1418,6 +1894,8 @@ def upload_new_file_instance(user_id: str, user_role: str, env_id: str, template
     conn = _get_db_conn()
     if not conn: return False, "Database connection failed."
     try:
+        validation_status = "Pending"
+        validation_summary = "Validation has not run."
         # 1. Get Environment and Blueprint rules
         env = get_environment_by_id(env_id)
         if not env: raise ValueError(f"Environment '{env_id}' not found.")
@@ -1458,9 +1936,53 @@ def upload_new_file_instance(user_id: str, user_role: str, env_id: str, template
         if bp['max_file_size_kb'] and file_size_kb > bp['max_file_size_kb']:
             raise ValueError(f"File size ({file_size_kb}KB) exceeds maximum of {bp['max_file_size_kb']}KB.")
 
-        # TODO: Add schema check here against bp['expected_structure']
-        validation_status = "Passed"
-        validation_summary = "File size and extension OK."
+            # --- Schema Validation ---
+            validation_status = "Passed"
+            validation_summary = "File size and extension OK."
+
+            try:
+                # 1. Load the expected structure from the blueprint
+                expected_json = bp.get('expected_structure', '{}')
+                if expected_json:  # Can be None or empty
+                    expected = json.loads(expected_json)
+                else:
+                    expected = {}
+
+                # 2. Load the actual structure we just extracted
+                actual = json.loads(file_metrics['actual_structure'])
+
+                # 3. Check for extraction errors
+                if "error" in actual:
+                    raise ValueError(f"File validation failed. It appears to be corrupt. {actual['error']}")
+
+                # 4. Perform the checks
+                if "tabs" in expected and "tabs" in actual:
+                    expected_tabs = set(expected['tabs'])
+                    actual_tabs = set(actual['tabs'])
+                    # Check if all expected tabs are present
+                    if not expected_tabs.issubset(actual_tabs):
+                        missing = expected_tabs - actual_tabs
+                        raise ValueError(f"Schema mismatch. Missing sheet(s): {missing}")
+                    validation_summary += " All expected sheets are present."
+
+                if "columns" in expected and "columns" in actual:
+                    expected_cols = set(expected['columns'])
+                    actual_cols = set(actual['columns'])
+                    # Check if all expected columns are present
+                    if not expected_cols.issubset(actual_cols):
+                        missing = expected_cols - actual_cols
+                        raise ValueError(f"Schema mismatch. Missing column(s): {missing}")
+                    validation_summary += " All expected columns are present."
+
+            except json.JSONDecodeError as e:
+                validation_status = "Error"
+                validation_summary = f"Could not parse validation rules: {e}"
+            except ValueError as e:
+                # This catches our schema mismatches
+                validation_status = "Failed"
+                validation_summary = str(e)
+                # Re-raise the error to stop the upload transaction
+                raise e
 
         # 7. Database Transaction (The "Dual-Write")
         with conn:
@@ -1491,7 +2013,8 @@ def upload_new_file_instance(user_id: str, user_role: str, env_id: str, template
             new_file_id_int = cursor.lastrowid
 
             # c) Log the "CREATE" action
-            _log_audit(conn, user_id, "CREATE", table, new_file_id_int, "User uploaded new file.", "Doer")
+            log_comment = custom_audit_comment or "User uploaded new file."
+            _log_audit(conn, user_id, "CREATE", table, new_file_id_int, log_comment, "Doer")
 
             # d) Log Lineage (if provided)
             if source_ids_map:
@@ -1506,6 +2029,137 @@ def upload_new_file_instance(user_id: str, user_role: str, env_id: str, template
 
     except Exception as e:
         return False, f"Error: {e}"
+    finally:
+        if conn: conn.close()
+
+def upload_edited_file(user_id: str, user_role: str, env_id: str, template_id: str,
+                       edited_data, file_extension: str, justification_comment: str):
+    """
+    (For "Editor" UI) Saves an in-app edit as a new, superseded file.
+    This function converts the edited data (e.g., DataFrame) into an
+    in-memory file and calls the main 'upload_new_file_instance' function
+    to ensure the full audit trail (supersede, hash, log) is executed.
+    """
+    try:
+        in_memory_file = io.BytesIO()
+        file_name_for_ui = f"edited_file{file_extension}"
+
+        # 1. Convert the edited data back into a file
+        if file_extension == '.xlsx':
+            # We must use 'openpyxl' engine for BytesIO
+            edited_data.to_excel(in_memory_file, index=False, engine='openpyxl')
+        elif file_extension == '.csv':
+            edited_data.to_csv(in_memory_file, index=False, encoding='utf-8')
+        elif file_extension == '.txt':
+            # Check if the edited data is a DataFrame (from a parsed table)
+            # or a string (from a raw text file)
+            if isinstance(edited_data, pd.DataFrame):
+                # It's a table, save it back as tab-delimited
+                # Using '\t' (tab) is a safer, more standard choice.
+                edited_data.to_csv(in_memory_file, index=False, sep='\t', encoding='utf-8')
+            else:
+                # It's a raw string, just encode and write it
+                in_memory_file.write(str(edited_data).encode('utf-8'))
+        else:
+            raise ValueError(f"In-app editing not supported for extension: {file_extension}")
+
+        # 2. Reset the file "pointer" to the beginning
+        in_memory_file.seek(0)
+
+        # 3. We must give the in-memory file a 'name' attribute,
+        # just like a real file upload has.
+        in_memory_file.name = file_name_for_ui
+
+        # 4. Call the main upload function, passing in the justification.
+        # This will automatically handle all the superseding and logging.
+        success, message = upload_new_file_instance(
+            user_id=user_id,
+            user_role=user_role,
+            env_id=env_id,
+            template_id=template_id,
+            uploaded_file=in_memory_file,
+            source_ids_map=None,  # Edits don't change lineage
+            custom_audit_comment=justification_comment  # This is the key
+        )
+
+        return success, message
+
+    except Exception as e:
+        return False, f"Error saving edited file: {e}"
+    finally:
+        # Close the in-memory file
+        if 'in_memory_file' in locals():
+            in_memory_file.close()
+
+
+def create_draft_model_file(env_id: str, user_id: str, user_role: str,
+                            template_id: str, run_name: str, justification: str):
+    """
+    (For "Lab Notebook" UI)
+    Creates a new, 'Pending' file in an instance table to act as a
+    "draft" or "save file" for an interactive model run.
+
+    This does *not* create a physical file, but reserves a spot
+    in the registry and logs the "creation" event.
+    """
+    conn = _get_db_conn()
+    if not conn: return False, "Database connection failed."
+
+    try:
+        # 1. Get blueprint and table info
+        bp = get_file_blueprint_by_id(template_id)
+        if not bp:
+            error_msg = (
+                f"Blueprint '{template_id}' not found.\n\n"
+                "🛠️ **How to fix:**\n"
+                "1. Go to the 'File Blueprint Manager' dashboard.\n"
+                f"2. Create a new blueprint with this exact Template ID: '{template_id}'."
+            )
+            raise ValueError(error_msg)
+
+        table_name = STAGE_TO_TABLE_MAP.get(bp['stage'])
+        id_col = TABLE_ID_MAP.get(table_name)
+        if not table_name: raise ValueError("Blueprint has no valid stage.")
+
+        # 2. Check "Doer" permissions
+        allowed_roles = (bp['doer_roles'] or 'admin').split(',')
+        if 'all' not in allowed_roles and user_role not in allowed_roles:
+            raise PermissionError(f"Your role ('{user_role}') is not authorized to create '{template_id}' files.")
+
+        # 3. Start transaction
+        with conn:
+            # 4. Insert the new "draft" file record
+            # We use the 'run_name' as the template_name for display
+            # and 'justification' as the validation_summary
+            # Note: file_path, hash, and size are NULL for a draft.
+            cursor = conn.execute(
+                f"""
+                INSERT INTO {table_name} (
+                    template_id, env_id, current_status, created_at, created_by,
+                    file_path, validation_summary, job_status
+                ) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+                """,
+                (
+                    template_id, env_id, 'Pending', user_id,
+                    run_name, justification, 'Draft'
+                )
+            )
+            new_run_id = cursor.lastrowid
+
+            # 5. Log this "creation" event to the audit trail
+            _log_audit(
+                conn, user_id, "CREATE_DRAFT", table_name, new_run_id,
+                f"Created new model run: {run_name}. Justification: {justification}",
+                "Doer"
+            )
+
+        # 6. Get the new file we just created and return it
+        # We need to build a small, re-usable "get_file_by_id" for this
+        new_run_data = get_file_by_id(table_name, new_run_id)
+        return True, dict(new_run_data)
+
+    except Exception as e:
+        return False, str(e)
     finally:
         if conn: conn.close()
 
@@ -1540,15 +2194,36 @@ def run_external_connection_job(user_id: str, user_role: str, env_id: str, templ
         base_url = APPROVED_DOMAINS[domain_key]
         final_url = base_url.rstrip('/') + "/" + url_path.lstrip('/')
 
-        # 4. --- (Placeholder) Download the File ---
-        # In a real app, use 'requests' or 'urllib' to download from 'final_url'
-        print(f"SIMULATION: Downloading from {final_url}")
-        simulated_file_content = f"fake,csv,data,from,web,{datetime.now()}".encode('utf-8')
-        simulated_file_name = f"{template_id}{bp['expected_extension']}"
-        # We create a temporary in-memory file to pass to our existing helpers
-        uploaded_file = io.BytesIO(simulated_file_content)
-        uploaded_file.name = simulated_file_name
-        # --- End of Placeholder ---
+        # 4. --- Download the File ---
+        try:
+            print(f"INFO: Attempting to download from {final_url}")
+            # The 'timeout' parameter is crucial to prevent the function
+            # from hanging indefinitely on a bad connection.
+            response = requests.get(final_url, timeout=30)  # 30-second timeout
+
+            # This line will raise an error for 4xx (e.g., 404 Not Found)
+            # or 5xx (e.g., 500 Server Error) responses.
+            response.raise_for_status()
+
+            # We create a temporary in-memory file from the downloaded content
+            uploaded_file = io.BytesIO(response.content)
+
+            # Use the blueprint's expected extension for the filename
+            uploaded_file.name = f"{template_id}{bp['expected_extension']}"
+
+        except requests.exceptions.HTTPError as e:
+            # Handle bad responses (404, 503, 500, etc.)
+            raise ValueError(f"Download failed: The URL returned a bad status. {e}")
+        except requests.exceptions.ConnectionError as e:
+            # Handle DNS failures, refused connections, etc.
+            raise ValueError(f"Download failed: Could not connect to the server. {e}")
+        except requests.exceptions.Timeout:
+            # Handle the request timing out
+            raise ValueError("Download failed: The request timed out.")
+        except Exception as e:
+            # Catch any other requests-related errors
+            raise ValueError(f"An unexpected download error occurred: {e}")
+        # --- End of Download ---
 
         # 5. Hashing and File Path
         file_hash = _hash_file_from_memory(uploaded_file)
@@ -1900,10 +2575,322 @@ def get_pending_actions_dashboard():
     finally:
         conn.close()
 
-def get_approved_domains() -> list:
-    """(For "Doer" UI) Returns the list of approved domain keys for the UI."""
-    return list(APPROVED_DOMAINS.keys())
+def get_approved_domains() -> dict:
+    """(For "Doer" UI) Returns the map of approved domains for the UI."""
+    return APPROVED_DOMAINS # <-- Return the whole dictionary
 
+def get_data_owner_teams() -> list:
+    """(For Admin UI) Returns the master list of data owner teams."""
+    return DATA_OWNER_TEAMS
+
+def get_editor_roles() -> list:
+    """(For UI Security) Returns the list of roles allowed to use the Data Editor."""
+    return EDITOR_ROLES
+
+
+def get_all_files_dataframe_for_env(env_id: str):
+    """
+    (For Overview Dashboard)
+    Gets the "Master DataFrame" for the readiness dashboard.
+    This is a heavy, complex query that joins all file and blueprint
+    data and calculates the governance status for *all* files.
+    """
+    conn = _get_db_conn()
+    if not conn: return pd.DataFrame()
+
+    # 1. Build a UNION ALL query to stack all 4 file tables
+    union_parts = []
+    for table, id_col in TABLE_ID_MAP.items():
+        if not table.startswith("inst_"): continue
+
+        union_parts.append(f"""
+            SELECT 
+                '{table}' AS table_name,
+                CAST({id_col} AS TEXT) AS file_id,
+                template_id,
+                current_status,
+                created_at,
+                created_by,
+                env_id
+            FROM {table}
+        """)
+
+    if not union_parts: return pd.DataFrame()
+
+    union_query = " UNION ALL ".join(union_parts)
+
+    # 2. Build the final "mega-query"
+    final_query = f"""
+        WITH AllFiles AS (
+            {union_query}
+        ),
+        FileStatus AS (
+            SELECT
+                f.file_id,
+                f.table_name,
+                f.template_id,
+                f.current_status,
+                f.created_at,
+                f.created_by,
+                f.env_id,
+                bp.template_name AS blueprint_name,
+                bp.stage,
+                bp.data_owner_team,
+                bp.source_type,
+                bp.data_sensitivity,
+                bp.signoff_workflow,
+
+                -- Check for Doer Signoff
+                EXISTS (
+                    SELECT 1 FROM gov_audit_trail a
+                    WHERE a.target_table = f.table_name
+                      AND a.target_id = f.file_id
+                      AND a.action = 'SIGN_OFF'
+                      AND a.signoff_capacity = 'Doer'
+                ) AS has_doer_signoff,
+
+                -- Check for Reviewer Signoff
+                EXISTS (
+                    SELECT 1 FROM gov_audit_trail a
+                    WHERE a.target_table = f.table_name
+                      AND a.target_id = f.file_id
+                      AND a.action = 'SIGN_OFF'
+                      AND a.signoff_capacity = 'Reviewer'
+                ) AS has_reviewer_signoff
+
+            FROM AllFiles f
+            LEFT JOIN bp_file_templates bp ON f.template_id = bp.template_id
+            WHERE f.env_id = ?
+        )
+        -- 3. Calculate the final governance status using CASE
+        SELECT 
+            *,
+            CASE
+                WHEN current_status = 'Rejected' THEN 'Rejected'
+                WHEN current_status = 'Superseded' THEN 'Superseded'
+                WHEN signoff_workflow = 'Doer + Reviewer' THEN
+                    CASE
+                        WHEN has_doer_signoff = 1 AND has_reviewer_signoff = 1 THEN 'Fully Approved'
+                        WHEN has_doer_signoff = 1 THEN 'Pending Review'
+                        ELSE 'Pending Doer'
+                    END
+                ELSE -- Doer Only
+                    CASE
+                        WHEN has_doer_signoff = 1 THEN 'Approved (Doer Only)'
+                        ELSE 'Pending Doer'
+                    END
+            END AS governance_status
+        FROM FileStatus
+        ORDER BY created_at DESC
+    """
+
+    try:
+        return pd.DataFrame([dict(row) for row in conn.execute(final_query, (env_id,)).fetchall()])
+    except Exception as e:
+        print(f"CRITICAL Error in get_all_files_dataframe_for_env: {e}", file=sys.stderr)
+        return pd.DataFrame()
+    finally:
+        if conn: conn.close()
+
+
+def get_audit_log_for_environment(env_id: str):
+    """
+    (For Overview Dashboard)
+    Gets *all* audit logs for a specific environment by finding all
+    files in that env and getting their logs.
+    """
+    conn = _get_db_conn()
+    if not conn: return []
+    try:
+        # 1. Get all file IDs in the environment
+        file_ids = []
+        tables = []
+        for table, id_col in TABLE_ID_MAP.items():
+            if not table.startswith("inst_"): continue
+
+            rows = conn.execute(f"SELECT {id_col} FROM {table} WHERE env_id = ?", (env_id,)).fetchall()
+            for row in rows:
+                file_ids.append(str(row[0]))  # Add ID as a string
+                tables.append(table)
+
+        if not file_ids:
+            return []
+
+        # 2. Get all logs for those files
+        placeholders = ', '.join(['?'] * len(file_ids))
+        query = f"""
+            SELECT * FROM gov_audit_trail
+            WHERE target_id IN ({placeholders})
+            ORDER BY timestamp DESC
+        """
+
+        return [dict(row) for row in conn.execute(query, file_ids).fetchall()]
+
+    except Exception as e:
+        print(f"Error in get_audit_log_for_environment: {e}", file=sys.stderr)
+        return []
+    finally:
+        if conn: conn.close()
+
+
+def get_full_lineage_graph(env_id: str):
+    """
+    (For Overview Dashboard)
+    Gets all nodes (files) and edges (links) for the lineage chart
+    in a specific environment.
+    """
+    conn = _get_db_conn()
+    if not conn: return {'nodes': [], 'edges': []}
+
+    try:
+        nodes = []
+        # 1. Get all files in the env as nodes
+        df = get_all_files_dataframe_for_env(env_id)
+        if df.empty:
+            return {'nodes': [], 'edges': []}
+
+        for _, row in df.iterrows():
+            nodes.append({
+                "id": f"{row['table_name']}_{row['file_id']}",
+                "label": row['blueprint_name'],
+                "status": row['governance_status']
+            })
+
+        # 2. Get all edges (links)
+        edges = []
+        links = conn.execute("SELECT * FROM gov_file_lineage").fetchall()
+        for link in links:
+            # We must build the same unique ID as above
+            parent_id = f"{link['parent_table']}_{link['parent_id']}"
+            child_id = f"{link['child_table']}_{link['child_id']}"
+
+            # Check if both ends of the link are in our node list
+            if parent_id in [n['id'] for n in nodes] and child_id in [n['id'] for n in nodes]:
+                edges.append({
+                    "from": parent_id,
+                    "to": child_id
+                })
+
+        return {'nodes': nodes, 'edges': edges}
+
+    except Exception as e:
+        print(f"Error in get_full_lineage_graph: {e}", file=sys.stderr)
+        return {'nodes': [], 'edges': []}
+    finally:
+        if conn: conn.close()
+
+
+def get_system_integrity_report(env_id: str):
+    """
+    (For Overview Dashboard)
+    Runs a full health check:
+    1. Finds orphaned files (DB, no disk)
+    2. Finds orphaned folders (Disk, no DB) - This is global, not env-specific
+    3. Finds hash mismatches (tampering)
+    """
+    conn = _get_db_conn()
+    if not conn: return {}
+
+    report = {
+        'orphaned_files': [],
+        'orphaned_folders': [],
+        'hash_mismatches': []
+    }
+
+    try:
+        # 1. Orphaned Files (in this env)
+        for table, id_col in TABLE_ID_MAP.items():
+            if not table.startswith("inst_"): continue
+            files = conn.execute(f"SELECT {id_col}, file_path FROM {table} WHERE env_id = ?", (env_id,)).fetchall()
+            for file in files:
+                full_path = os.path.join(ENVIRONMENT_ROOT_PATH, file['file_path'])
+                if not os.path.exists(full_path):
+                    report['orphaned_files'].append(dict(file))
+
+        # 2. Orphaned Folders (Global)
+        report['orphaned_folders'] = find_orphaned_folders()  # We can re-use this
+
+        # 3. Hash Mismatches (in this env)
+        for table, id_col in TABLE_ID_MAP.items():
+            if not table.startswith("inst_"): continue
+            files = conn.execute(f"SELECT {id_col}, file_path, file_hash_sha256 FROM {table} WHERE env_id = ?",
+                                 (env_id,)).fetchall()
+            for file in files:
+                full_path = os.path.join(ENVIRONMENT_ROOT_PATH, file['file_path'])
+                if os.path.exists(full_path):
+                    # Re-hash the file on disk
+                    sha256_hash = hashlib.sha256()
+                    with open(full_path, "rb") as f:
+                        for byte_block in iter(lambda: f.read(4096), b""):
+                            sha256_hash.update(byte_block)
+                    actual_hash = sha256_hash.hexdigest()
+
+                    if actual_hash != file['file_hash_sha256']:
+                        report['hash_mismatches'].append({
+                            "file_id": file[id_col],
+                            "table_name": table,
+                            "file_path": file['file_path'],
+                            "expected_hash": file['file_hash_sha256'],
+                            "actual_hash": actual_hash
+                        })
+
+        return report
+
+    except Exception as e:
+        print(f"Error in get_system_integrity_report: {e}", file=sys.stderr)
+        return report
+    finally:
+        if conn: conn.close()
+
+
+def get_all_permissions():
+    """
+    (For Overview Dashboard)
+    Gets the full user/file permissions matrix by cross-referencing
+    all blueprints with all known users (from the audit log).
+    """
+    conn = _get_db_conn()
+    if not conn: return {'by_user': {}, 'by_file': {}}
+    try:
+        blueprints = [dict(row) for row in conn.execute("SELECT * FROM bp_file_templates").fetchall()]
+        users = [dict(row) for row in conn.execute("SELECT DISTINCT user_id FROM gov_audit_trail").fetchall()]
+        # This is a stub. A real app would have a 'users' table.
+        # We'll simulate roles.
+        user_roles = {
+            u['user_id']: 'admin' if 'admin' in u['user_id'] else 'developer' if 'dev' in u['user_id'] else 'risk' for u
+            in users}
+        user_roles['default_user'] = 'commercial'
+
+        by_user = {}
+        for user, role in user_roles.items():
+            by_user[user] = []
+            for bp in blueprints:
+                if 'all' in bp['doer_roles'] or role in bp['doer_roles']:
+                    by_user[user].append({'Blueprint': bp['template_name'], 'Permission': 'Can Create (Doer)'})
+                if 'all' in bp['reviewer_roles'] or role in bp['reviewer_roles']:
+                    by_user[user].append({'Blueprint': bp['template_name'], 'Permission': 'Can Review'})
+                if role in EDITOR_ROLES:
+                    by_user[user].append({'Blueprint': bp['template_name'], 'Permission': 'Can Edit'})
+
+        by_file = {}
+        for bp in blueprints:
+            by_file[bp['template_id']] = []
+            for user, role in user_roles.items():
+                perms = []
+                if 'all' in bp['doer_roles'] or role in bp['doer_roles']: perms.append('Doer')
+                if 'all' in bp['reviewer_roles'] or role in bp['reviewer_roles']: perms.append('Reviewer')
+                if role in EDITOR_ROLES: perms.append('Editor')
+
+                if perms:
+                    by_file[bp['template_id']].append({'User': user, 'Role': role, 'Permissions': ", ".join(perms)})
+
+        return {'by_user': by_user, 'by_file': by_file}
+
+    except Exception as e:
+        print(f"Error in get_all_permissions: {e}", file=sys.stderr)
+        return {'by_user': {}, 'by_file': {}}
+    finally:
+        if conn: conn.close()
 
 # --- [S9] UNUSED / FUTURE FUNCTIONS ---
 

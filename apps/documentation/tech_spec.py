@@ -967,6 +967,7 @@ class Page:
                     | `min_file_size_kb`| The *minimum* valid file size in KB (a number). | `100` |
                     | `max_file_size_kb`| The *maximum* valid file size in KB (a number). | `10240` |
                     | `expected_structure`| A flexible JSON (text) blob of the *expected* structure. | `{"tabs": ["Summary", "Inputs"]}` |
+                    | `primary_key_column`| Optional field specifying which column of the first available data table should be used as a primary key. | `Date` |
                     | `template_status` | The current status (text) of *this template*. | `Active` |
                     | `created_at` | The timestamp of when this template was first registered. | `2024-10-01 09:00:00` |
                     | `created_by` | The text user ID of the person who registered this template. | `data.engineer@company.com` |

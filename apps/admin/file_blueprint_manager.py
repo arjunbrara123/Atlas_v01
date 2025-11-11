@@ -73,7 +73,7 @@ class Page:
         # --- Define all our form options ---
         self.all_roles = ["admin", "developer", "exec", "risk", "commercial", "inputs_admin"]
         self.file_blueprint_stages = ["Data Inputs", "Actuarial Models", "Results & Validation", "Reports & Insights"]
-        self.file_creation_methods = ["Manual Upload", "User-Triggered Job"]
+        #self.file_creation_methods = ["Manual Upload", "User-Triggered Job"]
         self.file_signoff_workflows = ["Doer Only", "Doer + Reviewer"]
         self.file_types_map = {
             "Spreadsheet": [".xlsx", ".xlsb", ".xlsm"],
@@ -87,7 +87,13 @@ class Page:
             self.approved_domains = registry_service.get_approved_domains()
         except Exception as e:
             st.error(f"Failed to load approved domains: {e}")
-            self.approved_domains = []  # Default to empty list on error
+            self.approved_domains = {}  # Default to empty list on error
+
+        try:
+            self.data_owner_teams = registry_service.get_data_owner_teams()
+        except Exception as e:
+            st.error(f"Failed to load data owner teams: {e}")
+            self.data_owner_teams = ["Platform Admin"]  # Fallback
 
         self.refresh_data()
 
@@ -231,6 +237,7 @@ class Page:
 
             # Pre-fill the file type and structure string
             bp['file_type'], bp['structure_str'] = _parse_json_to_ui(bp.get('expected_structure', ''))
+            source_type = bp['source_type']
 
             if action == "🛠️ Edit Existing":
                 is_new = False
@@ -256,10 +263,17 @@ class Page:
             template_id = c1.text_input("Template ID (e.g., `biz_plan_q4`)", value=bp.get('template_id', ''),
                                         disabled=not is_new,
                                         help="This is the 🗝️ Key and cannot be changed after creation.")
-            template_name = c2.text_input("Template Name", value=bp.get('template_name', ''))
-            stage = st.selectbox("Data Flow Stage", self.file_blueprint_stages,
+            template_name = c2.text_input("Descriptive Name (Human-friendly)", value=bp.get('template_name', ''),
+                                          help="A human-readable title for this blueprint. e.g., 'Met Office Hadley Centre Data', 'Q4 2025 Reserving Model'")
+            c1, c2 = st.columns(2)
+            stage = c1.selectbox("Data Flow Stage", self.file_blueprint_stages,
                                  index=self.file_blueprint_stages.index(bp.get('stage')) if bp.get(
                                      'stage') in self.file_blueprint_stages else 0)
+            data_owner_team = c2.selectbox("Data Owner Team",
+                                           options=self.data_owner_teams,  # Use the master list
+                                           index=self.data_owner_teams.index(bp.get('data_owner_team')) if bp.get(
+                                               'data_owner_team') in self.data_owner_teams else 0,
+                                           help="The business team responsible for this data.")
 
             st.markdown("##### Governance & Source (Smart Form)")
 
@@ -285,29 +299,43 @@ class Page:
                                                  help="The contact person at the vendor (e.g., john.doe@aon.com).")
 
             elif source_type == "External Connection":
-                domain_keys = self.approved_domains  # Get from class
+                # 1. Get the dictionary
+                domain_dict = self.approved_domains
+                # 2. Get the LIST of keys
+                domain_keys_list = list(domain_dict.keys())
 
-                source_name = c1.selectbox(
-                    "Approved Domain (from Whitelist)",
-                    options=domain_keys,
-                    index=domain_keys.index(bp.get('source_name')) if bp.get('source_name') in domain_keys else 0,
-                    help="Only pre-approved domains are available. Contact an admin to add a new one."
-                )
+                if not domain_keys_list:
+                    c1.error("No approved domains are loaded.")
+                    source_name = ""  # Set empty default
+                else:
+                    # 3. Find the index from the LIST
+                    selected_key = bp.get('source_name')
+                    default_index = 0
+                    if selected_key in domain_keys_list:
+                        default_index = domain_keys_list.index(selected_key)
+
+                    source_name = c1.selectbox(
+                        "Approved Domain (from Whitelist)",
+                        options=domain_keys_list,  # Pass the LIST of keys
+                        index=default_index,  # Pass the calculated integer index
+
+                        # The format_func uses the main DICTIONARY to look up the URL
+                        format_func=lambda key: f"{key}  ({domain_dict.get(key, 'N/A')})",
+
+                        help="Only pre-approved domains are available."
+                    )
+
+                # Put the path input *below* the URL
                 source_specifier = c2.text_input("URL Path / Endpoint",
                                                  value=bp.get('source_specifier', ''),
-                                                 help="The part of the URL *after* the domain. e.g., /pub/data/weather/latest.txt")
+                                                 help="The part of the URL *after* the base domain. e.g., /pub/data/weather/latest.txt")
 
-            data_sensitivity = st.selectbox("Data Sensitivity", ["Confidential", "Internal", "Public"],
-                                            index=["Confidential", "Internal", "Public"].index(
-                                                bp.get('data_sensitivity', 'Confidential')))
-
-            # --- END OF SMART SOURCE LOGIC ---
 
             st.markdown("##### Process & Sign-off Rules")
             c1, c2 = st.columns(2)
-            creation_method = c1.selectbox("Creation Method", self.file_creation_methods,
-                                           index=self.file_creation_methods.index(bp.get('creation_method')) if bp.get(
-                                               'creation_method') in self.file_creation_methods else 0)
+            data_sensitivity = c1.selectbox("Data Sensitivity", ["Confidential", "Internal", "Public"],
+                                            index=["Confidential", "Internal", "Public"].index(
+                                                bp.get('data_sensitivity', 'Confidential')))
             signoff_workflow = c2.selectbox("Sign-off Workflow", self.file_signoff_workflows,
                                             index=self.file_signoff_workflows.index(
                                                 bp.get('signoff_workflow')) if bp.get(
@@ -342,12 +370,20 @@ class Page:
 
             # Conditional text box for structure
             structure_input = ""
+            primary_key_column = ""
             if bp['file_type'] == "Spreadsheet":
                 structure_input = st.text_input("Expected Sheet Names (comma-separated)", bp.get('structure_str', ''),
                                                 help="e.g., Summary, Inputs, Calcs")
             elif bp['file_type'] == "CSV/TXT":
-                structure_input = st.text_input("Expected Column Names (comma-separated)", bp.get('structure_str', ''),
+                c1, c2 = st.columns(2)
+                structure_input = c1.text_input("Expected Column Names (comma-separated)", bp.get('structure_str', ''),
                                                 help="e.g., date, region, value")
+                primary_key_column = c2.text_input(
+                    "Primary Key Column (Optional)",
+                    value=bp.get('primary_key_column', ''),
+                    help="Optional: The column name that uniquely identifies a row (e.g., 'Policy_ID'). "
+                         "This enables a more powerful 'smart' comparison."
+                )
             else:
                 st.caption("No structure validation will be performed for 'Other' file types.")
 
@@ -385,7 +421,11 @@ class Page:
                     try:
                         expected_structure_json = _parse_structure_to_json(file_type, structure_input)
 
-                        # --- THIS IS THE FIX for the TypeError ---
+                        if source_type == "External Connection":
+                            creation_method = "User-Triggered Job"
+                        else:  # Internal and External Third Party
+                            creation_method = "Manual Upload"
+
                         # Package all form data into a single dictionary
                         form_data = {
                             "template_name": template_name,
@@ -401,6 +441,7 @@ class Page:
                             "doer_roles": ",".join(doer_roles_list),
                             "reviewer_roles": ",".join(reviewer_roles_list),
                             "expected_extension": expected_extension,
+                            "primary_key_column": primary_key_column,
                             "min_file_size_kb": min_file_size_kb,
                             "max_file_size_kb": max_file_size_kb,
                             "expected_structure": expected_structure_json,
