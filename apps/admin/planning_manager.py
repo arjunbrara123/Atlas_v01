@@ -704,7 +704,7 @@ class Page:
 
         try:
             milestones = registry_service.get_milestones_for_env(selected_env_id)
-            kpis, updated_milestones = _calculate_project_plan(milestones)
+            updated_milestones, kpis = _calculate_project_plan(milestones)
         except Exception as e:
             st.error(f"Could not load planning data: {e}")
             return

@@ -247,7 +247,7 @@ STAGE_TO_TABLE_MAP = {
 # This is CRITICAL for robust polymorphic queries and avoids all guessing bugs.
 TABLE_ID_MAP = {
     "inst_data_input_files":      "data_file_id",
-    "inst_actuarial_model_files": "model_run_id",
+    "inst_actuarial_model_files": "model_file_id",
     "inst_result_files":          "result_file_id",
     "inst_report_files":          "report_file_id",
     # Admin tables

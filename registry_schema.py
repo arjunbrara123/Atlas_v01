@@ -212,14 +212,21 @@ CREATE TABLE IF NOT EXISTS inst_actuarial_model_files (
     model_file_id INTEGER PRIMARY KEY AUTOINCREMENT,
     template_id TEXT NOT NULL,
     env_id TEXT NOT NULL,
-    model_run_id TEXT NOT NULL,
+    
+    -- This is now NULLABLE to allow for drafts
+    model_run_id TEXT,
     
     -- File Identity
     file_path TEXT NOT NULL UNIQUE,
-    file_hash_sha256 TEXT NOT NULL,
+    file_hash_sha256 TEXT,
+    
+    -- Metrics (ADDED FROM T3)
+    file_size_kb INTEGER,
+    actual_structure TEXT,
     
     -- Status
     current_status TEXT DEFAULT 'Active',
+    validation_summary TEXT,
     validation_summary TEXT,
     job_status TEXT,
     
